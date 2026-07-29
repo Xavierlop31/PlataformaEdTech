@@ -9,6 +9,10 @@ Los archivos de test listados en la última columna **aún no existen** — son 
 
 **Revisión (Spec.md v1.2.0):** se cerró el bloqueante de arquitectura de acceso a datos (`RNF10` — Route Handlers como único punto de entrada, sin `supabase-js` directo desde el frontend), se agregó `RLS-L5` (auto-despublicar al borrar la última lección de un curso publicado, gap introducido por `EP-13` en la ronda anterior), y se documentó el desempate de `position` duplicado (`created_at asc`, sin `unique constraint`).
 
+**Revisión (Spec.md v1.3.0):** dos hallazgos del Implementador sobre la implementación de `RLS-L5`: (1) la atomicidad borrar+despublicar se implementa como función RPC de Postgres (`delete_lesson_and_sync_publish`), no como llamadas secuenciales de `supabase-js`, porque estas últimas no comparten transacción; (2) esa misma función (y en general cualquier escritura gateada por ownership: `EP-04`, `EP-06`, `EP-12`, `EP-13`, `EP-14`, `EP-15`) no puede distinguir `403` de `404` a partir de "0 filas afectadas" — se resolvió con un patrón "`SELECT` de visibilidad antes de escribir" (mismo cliente scoped a la sesión, sin `service_role`) documentado en `Spec.md` §5.4bis, que requirió además ampliar `RLS-R2` (`reviews_select_public`) con `or auth.uid() = student_id` para que el autor de una review siempre pueda verla (y por lo tanto editarla/borrarla con el código de error correcto) aunque el curso se despublique después.
+
+**Revisión (Spec.md v1.3.1, sin impacto de seguridad):** dos observaciones de completitud sobre la enmienda de `RLS-R2`. (1) `EP-09` (listado público de reviews) ahora chequea `courses.is_published` explícitamente en el Route Handler, para seguir siendo estrictamente binario (`[]` si no publicado, sin excepción ni para el propio autor) — la enmienda de `RLS-R2` es solo para el `SELECT` puntual de `EP-14`/`EP-15`, no debe filtrarse al listado. (2) se aclaró con un comentario en `reviews.feature` que el paso "GET de esa review (lectura propia)" en el escenario de `RLS-R2` verifica la policy directamente contra Supabase CLI local (test-only), no un endpoint HTTP — no existe `GET /api/courses/:id/reviews/:reviewId` singular en el contrato.
+
 ## Tabla `courses`
 
 | Regla (Spec) | Descripción breve | Endpoint (Spec §5.4) | Escenario Gherkin | Test futuro (placeholder) | Estado |
@@ -20,6 +24,7 @@ Los archivos de test listados en la última columna **aún no existen** — son 
 | RLS-C5 | Solo el dueño puede `DELETE` | — (decisión validada: **fuera de la API v1**, RLS-only) | `docs/gherkin/courses.feature` → "Solo el instructor dueño puede borrar su curso" | `tests/integration/courses.steps.test.ts` | Especificado |
 | RLS-C6 | No se puede publicar (`is_published=true`) un curso con 0 lecciones (regla de negocio en Route Handler, no en RLS/Postgres) | EP-04 | `docs/gherkin/courses.feature` → "Publicar un curso sin lecciones es rechazado" | `tests/integration/courses.steps.test.ts` | Especificado |
 | — | Errores 401/404 de `EP-02`/`EP-04` | EP-02, EP-04 | `docs/gherkin/courses.feature` → "Crear un curso sin sesión devuelve 401" / "Editar un curso inexistente devuelve 404" | `tests/integration/courses.steps.test.ts` | Especificado |
+| — | Distinguir 403 (curso publicado, no dueño) de 404 (no existe / no publicado y no dueño) al editar un curso ajeno | EP-04, EP-06 | `docs/gherkin/courses.feature` → "Editar un curso ajeno publicado da 403" / "Editar un curso ajeno no publicado da 404, no 403" | `tests/integration/courses.steps.test.ts` | Especificado |
 
 ## Tabla `lessons`
 
@@ -32,6 +37,7 @@ Los archivos de test listados en la última columna **aún no existen** — son 
 | RLS-L5 | Borrar la última lección de un curso publicado auto-despublica el curso (regla de negocio en Route Handler, decisión validada) | EP-13 | `docs/gherkin/lessons.feature` → "Borrar la última lección de un curso publicado lo despublica" | `tests/integration/lessons.steps.test.ts` | Especificado |
 | — | 404 de `EP-05` cuando el curso no existe (distinto de "no inscrito" → `200 []`) | EP-05 | `docs/gherkin/lessons.feature` → "Un curso inexistente devuelve 404, no lista vacía" | `tests/integration/lessons.steps.test.ts` | Especificado |
 | — | Desempate de `position` duplicado por `created_at asc` (sin unique constraint, decisión validada) | EP-05, EP-06, EP-12 | `docs/gherkin/lessons.feature` → "Dos lecciones con la misma position se desempatan por fecha de creación" | `tests/integration/lessons.steps.test.ts` | Especificado |
+| — | Distinguir 403 (lección visible, inscrito pero no dueño) de 404 (no existe / no visible) al editar/borrar una lección ajena | EP-12, EP-13 | `docs/gherkin/lessons.feature` → "Un estudiante inscrito que no es dueño recibe 403 al editar una lección" / "Un instructor no relacionado recibe 404, no 403" | `tests/integration/lessons.steps.test.ts` | Especificado |
 
 ## Tabla `enrollments`
 
@@ -48,9 +54,10 @@ Los archivos de test listados en la última columna **aún no existen** — son 
 | Regla (Spec) | Descripción breve | Endpoint (Spec §5.4) | Escenario Gherkin | Test futuro (placeholder) | Estado |
 |---|---|---|---|---|---|
 | RLS-R1 | Solo estudiantes inscritos, con `profiles.role = 'estudiante'`, crean reviews (decisión validada — cruce de roles) | EP-10 | `docs/gherkin/reviews.feature` → "Solo un estudiante inscrito puede crear una review" / "Un instructor no puede dejar una review" | `tests/integration/reviews.steps.test.ts` | Especificado |
-| RLS-R2 | Lectura de reviews de curso publicado es libre | EP-09 | `docs/gherkin/reviews.feature` → "Las reviews de un curso publicado son visibles públicamente" | `tests/integration/reviews.steps.test.ts` | Especificado |
+| RLS-R2 | Lectura de reviews de curso publicado es libre; **además, el autor siempre puede leer su propia review** aunque el curso se despublique (enmienda validada — necesaria para que `EP-14`/`EP-15` puedan distinguir 403 de 404) | EP-09 | `docs/gherkin/reviews.feature` → "Las reviews de un curso publicado son visibles públicamente" / "El autor puede leer su propia review aunque el curso se despublique" | `tests/integration/reviews.steps.test.ts` | Especificado |
 | RLS-R3 | Un estudiante solo edita/borra su propia review | EP-14, EP-15 (decisión validada — sí se exponen en v1) | `docs/gherkin/reviews.feature` → "Un estudiante solo puede editar o borrar su propia review" | `tests/integration/reviews.steps.test.ts` | Especificado |
 | RLS-R4 | Máximo una review por (estudiante, curso) → `409` | EP-10 | `docs/gherkin/reviews.feature` → "Un estudiante no puede dejar más de una review por curso" | `tests/integration/reviews.steps.test.ts` | Especificado |
+| — | Distinguir 403 (visible, no autor) de 404 (no existe / no visible) al editar/borrar una review ajena | EP-14, EP-15 | `docs/gherkin/reviews.feature` → "Editar la review de otro en un curso publicado da 403" / "Editar una review inexistente da 404" | `tests/integration/reviews.steps.test.ts` | Especificado |
 
 ## Tabla `profiles`
 

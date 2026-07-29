@@ -14,6 +14,7 @@ Leer en este orden:
 4. [`docs/gherkin/`](docs/gherkin/) — criterios de aceptación en Gherkin (Dado/Cuando/Entonces), un archivo por entidad (`courses`, `lessons`, `enrollments`, `reviews`, `profiles`, `categories`), como especificación legible **y ejecutable** (ver ADR-0001).
 5. [`docs/traceability.md`](docs/traceability.md) — matriz que correlaciona cada regla del Spec con su endpoint, su escenario Gherkin y su futuro test automatizado.
 6. [`docs/adr/0001-estrategia-testing.md`](docs/adr/0001-estrategia-testing.md) — decisión validada de framework de testing (Vitest híbrido + Gherkin ejecutable + Supabase CLI local).
+7. [`docs/ambiguedades-resueltas.md`](docs/ambiguedades-resueltas.md) — registro histórico de las ambigüedades detectadas en la revisión del Implementador y cómo se resolvieron, ronda por ronda.
 
 ## Estructura del repo
 

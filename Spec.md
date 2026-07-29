@@ -1,7 +1,7 @@
 # Spec.md — Plataforma EdTech
 
-**Versión:** 1.2.1
-**Estado:** Draft para validación (ambigüedades de tres rondas de implementación resueltas — pendiente validar policies SQL contra Supabase de prueba)
+**Versión:** 1.3.1
+**Estado:** Draft para validación (ambigüedades de cuatro rondas de implementación resueltas, más dos observaciones menores sin impacto de seguridad — pendiente validar policies SQL contra Supabase de prueba)
 **Stack:** Next.js (App Router) + Supabase (Postgres + Auth + RLS + Storage)
 **Fecha:** 2026-07-29 (revisión sobre observaciones del Implementador)
 
@@ -284,8 +284,11 @@ begin
 
   delete from lessons where id = p_lesson_id;
   if not found then
-    -- RLS bloqueó el delete (no es el dueño) o la lección no existe; el Route Handler
-    -- traduce esto a 403/404 según corresponda (ver EP-13).
+    -- Esta excepción es un fallback de seguridad para una carrera genuina (la lección
+    -- desapareció/cambió de dueño entre el pre-chequeo del Route Handler y esta llamada),
+    -- NO el mecanismo para decidir 403 vs 404 — esa decisión ya se tomó ANTES de invocar
+    -- este RPC (ver "Distinguir 403 de 404" en §5.4bis). Si esto se dispara, el Route
+    -- Handler responde 404 (mismo criterio de indistinguibilidad que el resto del Spec).
     raise exception using errcode = 'PGRST', message = 'lesson_not_found_or_forbidden';
   end if;
 
@@ -343,7 +346,7 @@ POST /api/courses/:id/enroll
 | ID | Regla | Criterio verificable |
 |---|---|---|
 | RLS-R1 | Solo estudiantes **inscritos** en el curso, **con `profiles.role = 'estudiante'`**, pueden crear (`INSERT`) una review para ese curso. | Insert en `reviews` por un estudiante sin fila correspondiente en `enrollments (student_id, course_id)` **falla**. Insert de un usuario con `role = 'instructor'` **falla también**, incluso en cursos ajenos donde por hipótesis estuviera inscrito. Insert por un estudiante inscrito con `role = 'estudiante'` **se acepta**. **(Decisión validada — cruce de roles, mismo criterio que RLS-E2.)** |
-| RLS-R2 | La lectura de reviews de un curso publicado es libre (para mostrarlas en el detalle público, F7), incluso para anónimos. | `select * from reviews where course_id = X` (X publicado) con rol `anon` **devuelve las filas**. |
+| RLS-R2 | La lectura de reviews de un curso publicado es libre (para mostrarlas en el detalle público, F7), incluso para anónimos. **Además, el autor de una review siempre puede leer su propia fila**, incluso si el curso deja de estar publicado después (enmienda validada — ver nota bajo la policy SQL). | `select * from reviews where course_id = X` (X publicado) con rol `anon` **devuelve las filas**. `select * from reviews where id = Y and student_id = auth.uid()` **devuelve la fila propia** aunque el curso de `Y` esté `is_published = false`. |
 | RLS-R3 | Un estudiante solo puede editar/borrar **su propia** review. | `update/delete reviews where id = Y` con `auth.uid() != student_id` **afecta 0 filas**. **Decisión validada:** en v1 esta regla **sí** se expone como endpoint HTTP — `PATCH /api/courses/:id/reviews/:reviewId` (EP-14) y `DELETE /api/courses/:id/reviews/:reviewId` (EP-15). |
 | RLS-R4 | Un estudiante no puede dejar más de una review por curso. | La restricción `unique (student_id, course_id)` rechaza el segundo insert (constraint violation → el endpoint debe responder 409, igual patrón que RLS-E3). |
 
@@ -355,6 +358,7 @@ create policy "reviews_select_public"
 on reviews for select
 using (
   exists (select 1 from courses c where c.id = reviews.course_id and c.is_published = true)
+  or auth.uid() = student_id
 );
 
 create policy "reviews_insert_enrolled_student"
@@ -373,6 +377,11 @@ on reviews for update using ( auth.uid() = student_id ) with check ( auth.uid() 
 create policy "reviews_delete_own"
 on reviews for delete using ( auth.uid() = student_id );
 ```
+> **Enmienda validada — por qué `reviews_select_public` ahora incluye `or auth.uid() = student_id`:** sin esta cláusula, un autor no podría ver (ni el Route Handler distinguir el error de) su propia review si el curso se despublica después de dejarla, porque `RLS-R3` (editar/borrar propia) no depende de `is_published` pero la lectura pública sí. Esta enmienda hace que "quien puede escribir una review, siempre puede también leerla" — condición necesaria para el patrón de 403 vs 404 de §5.4bis.
+>
+> **Nota — esto NO debe filtrarse a `EP-09` (decisión validada):** `EP-09` (`GET /api/courses/:id/reviews`, el listado público) sigue siendo estrictamente binario — `[]` si el curso no está publicado, para cualquiera, incluido el propio autor. La cláusula `or auth.uid() = student_id` solo importa para el `SELECT` puntual por `id` que hacen `EP-14`/`EP-15` antes de escribir; el Route Handler de `EP-09` chequea `courses.is_published` de forma explícita en la capa de aplicación en vez de delegar la condición completa a esta policy, para no exponer una review propia en un listado que se documenta como "de un curso publicado". Ver `docs/contracts/endpoints.md` EP-09.
+
+
 
 #### `profiles` / `categories`
 
@@ -442,18 +451,18 @@ using ( true );
 | EP-01 | `/api/courses` | GET | No | 200 `Course[]` (solo publicados si no autenticado o no dueño; admite `?category=`, `?page=`, `?limit=`) | — |
 | EP-02 | `/api/courses` | POST | Sí (instructor) | 201 `Course` | 403 si rol != instructor, 400 validación |
 | EP-03 | `/api/courses/:id` | GET | No | 200 `CourseWithInstructor` (incluye `average_rating`/`review_count`) | 404 si no publicado y no es el dueño |
-| EP-04 | `/api/courses/:id` | PATCH | Sí (dueño) | 200 `Course` | 403 si `auth.uid() != instructor_id`, 404, **400 si publica sin lecciones o payload inválido** |
+| EP-04 | `/api/courses/:id` | PATCH | Sí (dueño) | 200 `Course` | 403 solo si el curso es visible y no es el dueño; 404 si no existe o no es visible (ver "Distinguir 403 de 404" en §5.4bis); **400 si publica sin lecciones o payload inválido** |
 | EP-05 | `/api/courses/:id/lessons` | GET | No | 200 `Lesson[]` (**vacío `[]` si no inscrito**, nunca 403) | 404 si el curso no existe/no es visible |
-| EP-06 | `/api/courses/:id/lessons` | POST | Sí (dueño) | 201 `Lesson` | 403 si no es dueño, 400 validación |
+| EP-06 | `/api/courses/:id/lessons` | POST | Sí (dueño) | 201 `Lesson` | 403 solo si el curso padre es visible y no es dueño; 404 si el curso no existe/no es visible (§5.4bis); 400 validación |
 | EP-07 | `/api/courses/:id/enroll` | POST | Sí (estudiante) | 201 `Enrollment` | **409 si ya inscrito**, 403 si rol != estudiante, 404 si curso no publicado, 401 |
 | EP-08 | `/api/enrollments` | GET | Sí | 200 `Enrollment[]` (**solo propias**; admite `?course_id=` para el instructor dueño, F5) | 401 |
-| EP-09 | `/api/courses/:id/reviews` | GET | No | 200 `Review[]` (si curso publicado) | — |
+| EP-09 | `/api/courses/:id/reviews` | GET | No | 200 `Review[]` (**`[]` si curso no publicado, sin excepción — ni para el propio autor**, ver nota bajo RLS-R2) | — |
 | EP-10 | `/api/courses/:id/reviews` | POST | Sí (estudiante inscrito) | 201 `Review` | **403 si no inscrito o rol != estudiante**, 409 si ya dejó review |
 | EP-11 | `/api/categories` | GET | No | 200 `Category[]` | — |
-| EP-12 | `/api/courses/:id/lessons/:lessonId` | PATCH | Sí (dueño) | 200 `Lesson` | 403 si no es dueño, 404, 400 validación |
-| EP-13 | `/api/courses/:id/lessons/:lessonId` | DELETE | Sí (dueño) | 204 (auto-despublica el curso si era la última lección de un curso publicado — `RLS-L5`) | 403 si no es dueño, 404 |
-| EP-14 | `/api/courses/:id/reviews/:reviewId` | PATCH | Sí (autor) | 200 `Review` | 403 si no es autor, 404, 400 validación |
-| EP-15 | `/api/courses/:id/reviews/:reviewId` | DELETE | Sí (autor) | 204 | 403 si no es autor, 404 |
+| EP-12 | `/api/courses/:id/lessons/:lessonId` | PATCH | Sí (dueño) | 200 `Lesson` | 403 solo si la lección es visible (inscrito) y no es dueño; 404 si no existe o no es visible (§5.4bis); 400 validación |
+| EP-13 | `/api/courses/:id/lessons/:lessonId` | DELETE | Sí (dueño) | 204 (auto-despublica el curso si era la última lección de un curso publicado — `RLS-L5`) | 403 solo si la lección es visible (inscrito) y no es dueño; 404 si no existe o no es visible (§5.4bis) |
+| EP-14 | `/api/courses/:id/reviews/:reviewId` | PATCH | Sí (autor) | 200 `Review` | 403 si la review es visible y no es autor; 404 si no existe o no es visible (§5.4bis); 400 validación |
+| EP-15 | `/api/courses/:id/reviews/:reviewId` | DELETE | Sí (autor) | 204 | 403 si la review es visible y no es autor; 404 si no existe o no es visible (§5.4bis) |
 | EP-16 | `/api/profiles` | POST | Sí (sesión, sin perfil aún) | 201 `Profile` | 409 si ya existe perfil para `auth.uid()`, 400 validación (`role` inválido) |
 | EP-17 | `/api/profiles/me` | GET | Sí | 200 `Profile` | 404 si aún no creó su perfil |
 | EP-18 | `/api/profiles/me` | PATCH | Sí | 200 `Profile` | 400 si intenta cambiar `role` (campo ignorado/rechazado) |
@@ -479,6 +488,23 @@ using ( true );
 **Errores de validación (`400 Bad Request`):** nueva variante `"validation_error"` en `ApiError`. Se dispara en cualquier endpoint de escritura (`EP-02, EP-04, EP-06, EP-10, EP-12, EP-14, EP-16, EP-18`) cuando el body no cumple los límites de `§5.2` u otras reglas de forma: `title`/`full_name` vacíos o demasiado largos, `price < 0`, `rating` fuera de 1–5, `content_url` no es una URL válida (`http(s)://`), UUID malformado en un parámetro de ruta. Response: `{ "error": "validation_error", "message": "<detalle>" }`.
 
 **Existencia vs. autorización (EP-05, y por extensión EP-06/EP-12/EP-13):** antes de aplicar la lógica de "200 + `[]` si no inscrito" (RLS-L2), el Route Handler primero verifica que el curso exista y sea visible para quien llama (mismo criterio que `RLS-C2`/EP-03): si `course_id` no existe, o no está publicado y quien pregunta no es el dueño, la respuesta es **404**. Solo si el curso existe/es visible se evalúa la inscripción, y ahí sí "no inscrito" → `200 []` en vez de un error. Esto resuelve la ambigüedad entre "curso inexistente" y "curso sin acceso": ambos casos previos a RLS-L2 se tratan igual que EP-03.
+
+**Distinguir 403 de 404 en escrituras gateadas por ownership (decisión validada — `EP-04`, `EP-06`, `EP-12`, `EP-13`, `EP-14`, `EP-15`):** una vez que las escrituras solo pasan por el cliente scoped a la sesión (`RNF10`), un `UPDATE`/`DELETE` con `WHERE id = X` que afecta 0 filas es **indistinguible** entre "el recurso no existe" y "existe pero RLS no te deja escribirlo" — RLS filtra ambos casos de la misma forma antes de llegar a la política de escritura. Para no perder la distinción 403/404 que estos endpoints prometen, **sin introducir una segunda vía de acceso a datos** (no se usa `service_role` para este chequeo — seguiría siendo una sola vía, la del cliente scoped a la sesión, tal como exige `RNF10`), el Route Handler sigue este patrón:
+
+1. **Verifica visibilidad primero:** hace un `SELECT` del recurso por `id` con el mismo cliente RLS-scoped que ya va a usar para escribir (la policy de `SELECT` de esa tabla, no la de escritura).
+2. **0 filas en el `SELECT`** → **404**. Cubre tanto "no existe" como "existe pero la policy de lectura te lo oculta" — mismo criterio de no revelar existencia que `RLS-C2`/`EP-03`/`EP-05`, extendido a escrituras en vez de ser exclusivo de lecturas.
+3. **1 fila en el `SELECT`** (el recurso es visible) **pero el `UPDATE`/`DELETE` posterior afecta 0 filas** → **403**. Solo ocurre cuando la policy de lectura es más permisiva que la de escritura para ese recurso — ver la tabla de abajo.
+
+Esto requiere que, para cada tabla, la policy de `SELECT` sea **igual o más permisiva** que su policy de escritura (todo lo que se puede escribir, se puede leer) — si no se cumple, el patrón podría devolver un `404` incorrecto para una escritura legítima. Por eso se hizo la enmienda a `reviews_select_public` (§5.3, `RLS-R2`) agregando `or auth.uid() = student_id`: sin ella, el autor de una review en un curso ya despublicado podría editar/borrar su propia review (`RLS-R3` no depende de `is_published`) pero el paso 1 de este patrón le devolvería `404` porque la lectura pública sí depende de `is_published`.
+
+| Endpoint | Policy de lectura usada en el paso 1 | Cuándo da `403` (visible, pero no dueño/autor) | Cuándo da `404` (no visible) |
+|---|---|---|---|
+| `EP-04` (`PATCH` curso) | `courses_select_published_or_owner` | Curso publicado, quien llama no es el `instructor_id` | Curso no existe, o no publicado y quien llama no es el dueño |
+| `EP-06` (`POST` lección, chequeo del curso padre) | `courses_select_published_or_owner` | Curso publicado, quien llama no es el `instructor_id` | Curso no existe, o no publicado y quien llama no es el dueño |
+| `EP-12`/`EP-13` (`PATCH`/`DELETE` lección) | `lessons_select_enrolled_or_owner` | Quien llama está **inscrito** en el curso pero no es el `instructor_id` (caso posible pero infrecuente: un estudiante forzando la ruta de escritura) | Lección no existe, o quien llama no está inscrito ni es el dueño (el caso típico: otro instructor cualquiera) |
+| `EP-14`/`EP-15` (`PATCH`/`DELETE` review) | `reviews_select_public` (ya con la enmienda de `RLS-R2`) | Curso publicado y quien llama no es el `student_id` de la review (caso común: cualquier usuario autenticado) | Review no existe, o (curso no publicado y quien llama no es su autor) |
+
+Para `EP-13` específicamente, este chequeo de visibilidad ocurre **antes** de invocar la función RPC `delete_lesson_and_sync_publish` (`RLS-L5`) — la función en sí no distingue 403 de 404, solo ejecuta el borrado ya autorizado por el paso 1.
 
 ---
 
@@ -510,5 +536,6 @@ using ( true );
 - [x] Confirmar comportamiento al borrar la última lección de un curso publicado (`EP-13`): **auto-despublica el curso**, implementado como función RPC de Postgres (`delete_lesson_and_sync_publish`) para atomicidad real, no como llamadas secuenciales de `supabase-js` (decisión validada, ver `RLS-L5`).
 - [x] Confirmar manejo de `lessons.position` duplicado: **se permite, desempate por `created_at asc`**, sin `unique constraint` (decisión validada, ver DDL §5.2 y orden por defecto §5.4bis).
 - [x] Confirmar paginación de `EP-05` (lecciones): **se pagina igual que `EP-01`/`EP-08`/`EP-09`** (`?page=`/`?limit=`, default 20) — decisión validada, ver §5.4bis.
+- [x] Confirmar cómo distinguir `403` de `404` en escrituras gateadas por ownership (`EP-04`, `EP-06`, `EP-12`, `EP-13`, `EP-14`, `EP-15`): **patrón "SELECT visibilidad, luego escritura"** con el mismo cliente scoped a la sesión (sin `service_role`), más la enmienda a `RLS-R2` para que `reviews_select_public` incluya al autor — decisión validada, ver "Distinguir 403 de 404" en §5.4bis.
 - [ ] Validar que las policies SQL de referencia (§5.3), incluyendo las nuevas de `profiles`/`categories`, se ejecuten sin error contra una instancia Supabase de prueba antes de mover este SPEC a "Aprobado".
 - [ ] (Backlog, fuera de v1) Evaluar un patrón de "preview gratuito" (primera lección visible sin inscripción) — no forma parte de este SPEC; RLS-L1/L2 lo prohíben tal como están hoy por diseño.

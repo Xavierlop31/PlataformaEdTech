@@ -21,11 +21,26 @@ Feature: Visibilidad y edición de cursos
 
   @RLS-C3 @EP-04
   Scenario: Solo el instructor dueño puede editar su curso
-    Dado que existe un curso perteneciente al instructor A
+    Dado que existe un curso publicado perteneciente al instructor A
     Cuando el instructor B intenta PATCH /api/courses/:id sobre ese curso
     Entonces la respuesta es 403
     Cuando el instructor A intenta PATCH /api/courses/:id sobre ese mismo curso
     Entonces la respuesta es 200 y el curso queda actualizado
+
+  @RLS-C3 @EP-04 @EP-06
+  Scenario: Editar un curso ajeno publicado da 403
+    Dado que existe un curso con is_published = true perteneciente al instructor A
+    Cuando el instructor B (distinto de A) intenta PATCH /api/courses/:id sobre ese curso
+    Entonces la respuesta es 403
+    Y el cuerpo de la respuesta indica error "forbidden"
+
+  @RLS-C3 @EP-04 @EP-06
+  Scenario: Editar un curso ajeno no publicado da 404, no 403
+    Dado que existe un curso con is_published = false perteneciente al instructor A
+    Cuando el instructor B (distinto de A) intenta PATCH /api/courses/:id sobre ese curso
+    Entonces la respuesta es 404
+    Y el cuerpo de la respuesta indica error "not_found"
+    Y la respuesta NO es 403 (el instructor B no puede ver que el curso existe)
 
   @RLS-C4 @EP-02
   Scenario: Solo un usuario con rol instructor puede crear un curso

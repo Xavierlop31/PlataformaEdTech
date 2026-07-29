@@ -47,14 +47,30 @@ Feature: Acceso a lecciones de un curso
   @RLS-L4 @EP-12 @EP-13
   Scenario: Solo el instructor dueño puede editar o borrar una lección
     Dado que el curso C pertenece al instructor A y tiene una lección L
-    Cuando el instructor B intenta PATCH /api/courses/C/lessons/L
-    Entonces la respuesta es 403
-    Cuando el instructor B intenta DELETE /api/courses/C/lessons/L
-    Entonces la respuesta es 403
     Cuando el instructor A intenta PATCH /api/courses/C/lessons/L
     Entonces la respuesta es 200 y la lección queda actualizada
     Cuando el instructor A intenta DELETE /api/courses/C/lessons/L
     Entonces la respuesta es 204 y la lección queda eliminada
+
+  @RLS-L4 @EP-12 @EP-13
+  Scenario: Un instructor no relacionado recibe 404, no 403, al intentar editar una lección ajena
+    Dado que el curso C pertenece al instructor A y tiene una lección L
+    Y el instructor B no está inscrito en el curso C (los instructores no se inscriben) ni es su dueño
+    Cuando el instructor B intenta PATCH /api/courses/C/lessons/L
+    Entonces la respuesta es 404
+    Y el cuerpo de la respuesta indica error "not_found"
+    Cuando el instructor B intenta DELETE /api/courses/C/lessons/L
+    Entonces la respuesta es 404
+
+  @RLS-L4 @EP-12 @EP-13
+  Scenario: Un estudiante inscrito que no es dueño recibe 403 al intentar editar una lección
+    Dado que el curso C pertenece al instructor A y tiene una lección L
+    Y el estudiante E está inscrito en el curso C (puede ver la lección L, pero no es su dueño)
+    Cuando el estudiante E intenta PATCH /api/courses/C/lessons/L
+    Entonces la respuesta es 403
+    Y el cuerpo de la respuesta indica error "forbidden"
+    Cuando el estudiante E intenta DELETE /api/courses/C/lessons/L
+    Entonces la respuesta es 403
 
   @EP-05
   Scenario: Un curso inexistente devuelve 404, no lista vacía

@@ -79,8 +79,8 @@ Edita campos del curso, incluyendo publicar/despublicar.
 ```
 - **Response 200:** `Course` actualizado.
 - **Errores:**
-  - `403 { "error": "forbidden" }` — `auth.uid() != instructor_id`.
-  - `404 { "error": "not_found" }` — el curso no existe.
+  - `403 { "error": "forbidden" }` — el curso es visible para quien llama (publicado) pero no es el `instructor_id`.
+  - `404 { "error": "not_found" }` — el curso no existe, o no está publicado y quien llama no es el dueño (mismo criterio de indistinguibilidad que `EP-03`/`RLS-C2` — ver "Distinguir 403 de 404" más abajo).
   - `400 { "error": "validation_error" }` — se intenta `is_published: true` con 0 filas en `lessons` para este curso; o `title`/`price`/`description` fuera de los límites de `Spec.md` §5.2.
 
 > **Despublicar (`is_published: false`) no revoca acceso** de estudiantes ya inscritos a las lecciones — ver nota bajo `RLS-L1` en `Spec.md` §5.3. Este endpoint no dispara ninguna lógica adicional de revocación.
@@ -124,8 +124,8 @@ Crea una lección dentro de un curso propio.
 ```
 - **Response 201:** `Lesson` creada.
 - **Errores:**
-  - `403 { "error": "forbidden" }` — quien llama no es el `instructor_id` del curso padre.
-  - `404 { "error": "not_found" }` — el curso no existe.
+  - `403 { "error": "forbidden" }` — el curso padre es visible (publicado) pero quien llama no es su `instructor_id`.
+  - `404 { "error": "not_found" }` — el curso padre no existe, o no está publicado y quien llama no es el dueño (ver "Distinguir 403 de 404" más abajo).
   - `400 { "error": "validation_error" }` — `title` vacío/>200 chars, `content_url` no es URL válida o >2048 chars.
 
 > **`position` duplicado (decisión validada):** no se rechaza ni se reindexan las demás lecciones. Si `position` coincide con el de otra lección del mismo curso, el orden entre ambas en `EP-05` se desempata por `created_at asc`. El frontend es responsable de mandar valores coherentes al reordenar.
@@ -165,12 +165,13 @@ Lista las inscripciones del usuario autenticado.
 
 ## EP-09 — `GET /api/courses/:id/reviews`
 
-Lista las reviews de un curso publicado (lectura pública, para mostrar en la ficha del curso).
+Lista las reviews de un curso publicado (lectura pública, para mostrar en la ficha del curso). **Estrictamente binario por diseño (decisión validada):** si `course.is_published = false`, la respuesta es `[]` para **cualquiera**, incluido el propio autor de una review ahí — sin excepción.
 
 - **Auth:** No requerida.
 - **Reglas asociadas:** `RLS-R2`.
 - **Orden por defecto:** `created_at desc`. Admite `?page=`/`?limit=`, header `X-Total-Count`.
 - **Response 200:** `Review[]`.
+- **Implementación (nota, decisión validada):** la enmienda de `RLS-R2` (`or auth.uid() = student_id` en `reviews_select_public`) existe **solo** para que `EP-14`/`EP-15` puedan distinguir 403 de 404 sobre la propia review (§5.4bis de `Spec.md`). Ese matiz **no** debe filtrarse a este endpoint público: el Route Handler de `EP-09` chequea `courses.is_published` explícitamente en la capa de aplicación (no delega la condición completa a RLS) y devuelve `[]` si el curso no está publicado, sin importar quién pregunte. Esto mantiene a `EP-09` estrictamente atado a "curso publicado", tal como dice su descripción.
 
 ---
 
@@ -218,8 +219,8 @@ Edita una lección de un curso propio (título, `content_url`, `position`).
 ```
 - **Response 200:** `Lesson` actualizada.
 - **Errores:**
-  - `403 { "error": "forbidden" }` — quien llama no es el `instructor_id` del curso padre.
-  - `404 { "error": "not_found" }` — la lección o el curso no existen.
+  - `403 { "error": "forbidden" }` — la lección es visible para quien llama (está inscrito en el curso) pero no es el `instructor_id` del curso padre — caso posible aunque infrecuente (un estudiante forzando esta ruta).
+  - `404 { "error": "not_found" }` — la lección/el curso no existen, o quien llama no está inscrito ni es el dueño (no puede ni verla — ver "Distinguir 403 de 404" más abajo; es el caso típico: otro instructor cualquiera).
   - `400 { "error": "validation_error" }` — mismos límites que EP-06.
 
 > `position` duplicado: mismo criterio que EP-06 — no se rechaza, se desempata por `created_at asc` en EP-05.
@@ -236,8 +237,9 @@ Elimina una lección de un curso propio.
 - **Efecto colateral:** si la lección eliminada era la **última** del curso y el curso estaba `is_published = true`, la función deja `is_published = false` de forma atómica junto con el borrado. Si quedan ≥1 lecciones, no cambia nada.
 - **Response 204:** sin body. El frontend debe asumir que el curso puede haber cambiado su estado de publicación y refrescar `GET /api/courses/:id` si lo necesita mostrar.
 - **Errores:**
-  - `403 { "error": "forbidden" }` — quien llama no es el `instructor_id` del curso padre (la función no borra ninguna fila por RLS; el handler traduce a 403).
-  - `404 { "error": "not_found" }` — la lección o el curso no existen.
+  - `403 { "error": "forbidden" }` — la lección es visible para quien llama pero no es el `instructor_id` del curso padre.
+  - `404 { "error": "not_found" }` — la lección/el curso no existen, o no son visibles para quien llama.
+  - **Cómo se decide 403 vs 404 (importante, ver "Distinguir 403 de 404" más abajo):** la función RPC en sí **no puede distinguir** ambos casos — un `DELETE` que afecta 0 filas por RLS es igual tanto si la lección no existe como si existe pero no sos el dueño. El Route Handler decide **antes** de invocar `delete_lesson_and_sync_publish`: hace un `SELECT` de la lección con el mismo cliente scoped a la sesión (policy `lessons_select_enrolled_or_owner`); 0 filas → 404; 1 fila (visible) pero no sos el dueño → 403; solo si sos el dueño se invoca el RPC.
 
 ---
 
@@ -253,8 +255,8 @@ Edita la propia review (rating y/o comentario).
 ```
 - **Response 200:** `Review` actualizada.
 - **Errores:**
-  - `403 { "error": "forbidden" }` — `auth.uid() != student_id` de la review.
-  - `404 { "error": "not_found" }` — la review no existe.
+  - `403 { "error": "forbidden" }` — la review es visible (curso publicado, o sos su autor) pero `auth.uid() != student_id`.
+  - `404 { "error": "not_found" }` — la review no existe, o no es visible para quien llama (curso no publicado y no sos el autor — ver "Distinguir 403 de 404" más abajo; usa `reviews_select_public` ya con la enmienda de `RLS-R2` que agrega `or auth.uid() = student_id`, sin la cual un autor en un curso despublicado recibiría 404 al editar su propia review).
   - `400 { "error": "validation_error" }` — `rating` fuera de 1–5, `comment` >2000 chars.
 
 ---
@@ -267,8 +269,8 @@ Elimina la propia review.
 - **Reglas asociadas:** `RLS-R3`.
 - **Response 204:** sin body.
 - **Errores:**
-  - `403 { "error": "forbidden" }` — `auth.uid() != student_id` de la review.
-  - `404 { "error": "not_found" }` — la review no existe.
+  - `403 { "error": "forbidden" }` — la review es visible (curso publicado, o sos su autor) pero `auth.uid() != student_id`.
+  - `404 { "error": "not_found" }` — la review no existe, o no es visible para quien llama (mismo criterio que EP-14).
 
 ---
 
@@ -326,5 +328,6 @@ Edita el perfil propio. **`role` no es un campo aceptado** (inmutable en v1) —
 - **Paginación:** `?page=` (default `1`) / `?limit=` (default `20`, máx `100`) en `EP-01`, `EP-05`, `EP-08`, `EP-09`. El body sigue siendo el array plano; el total sin paginar va en el header `X-Total-Count`.
 - **400 Bad Request:** nueva variante `"validation_error"` de `ApiError`, usada en todo endpoint de escritura para: campos de texto vacíos o fuera de longitud (`Spec.md` §5.2), `price < 0`, `rating` fuera de 1–5, `content_url` con formato inválido, y parámetros de ruta/query que no son UUIDs válidos.
 - **Efectos colaterales de escritura:** `EP-13` auto-despublica el curso si borra su última lección estando publicado (`RLS-L5`), implementado como función RPC de Postgres (`delete_lesson_and_sync_publish`) para atomicidad real — no como llamadas secuenciales de `supabase-js`.
+- **Distinguir 403 de 404 (`EP-04`, `EP-06`, `EP-12`, `EP-13`, `EP-14`, `EP-15`):** un `UPDATE`/`DELETE` que afecta 0 filas por RLS es indistinguible entre "no existe" y "no tenés permiso". El Route Handler resuelve esto con un `SELECT` de visibilidad primero (mismo cliente scoped a la sesión, sin `service_role`): 0 filas → `404` (mismo criterio de no revelar existencia que `RLS-C2`/`EP-03`/`EP-05`); 1 fila visible pero la escritura falla → `403`. Requiere que la policy de lectura de cada tabla sea igual o más permisiva que la de escritura — por eso `reviews_select_public` (`RLS-R2`) se amplió con `or auth.uid() = student_id`. Detalle completo y tabla por endpoint en `Spec.md` §5.4bis, "Distinguir 403 de 404 en escrituras gateadas por ownership".
 - **`position` de lecciones:** sin `unique constraint`; duplicados permitidos, desempate por `created_at asc` en `EP-05`.
 - **Fuera de alcance v1 (explícito, no pendiente):** `DELETE /api/courses/:id` (RLS-C5 vive solo en RLS), subida de archivos a Supabase Storage (RNF8 de `Spec.md`), integración de pagos (§1 de `Spec.md`), preview gratuito de lecciones sin inscripción (RLS-L1/L2 lo prohíben tal como están).
