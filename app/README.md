@@ -1,32 +1,43 @@
-# app/ (placeholder)
+# app/ — implementado
 
-Esta carpeta está vacía intencionalmente. Cuando arranque la fase de implementación (Next.js App Router), aquí vivirá una estructura equivalente a:
+Estructura real (Next.js App Router, Next.js 16 + React 19 + Tailwind v4):
 
 ```
 app/
+├── layout.tsx                            # fuente Sora, Navbar/Footer, tokens de Technical_spec.md
+├── globals.css                           # design tokens (papaya/carbon/surface/speedline)
+├── login/page.tsx                        # OAuth Google (client) → /auth/callback
+├── onboarding/page.tsx                   # elección de rol — EP-16 (fuera de (auth) para evitar loop de redirect)
+├── auth/
+│   ├── callback/route.ts                 # exchangeCodeForSession + redirect a /onboarding si falta perfil
+│   └── signout/route.ts
+│
 ├── (public)/
-│   ├── page.tsx                         # catálogo — EP-01, filtro por categoría (EP-11)
-│   └── courses/[id]/page.tsx            # detalle público — EP-03, EP-09
+│   ├── page.tsx                          # catálogo — EP-01, filtro por categoría (EP-11)
+│   └── courses/[id]/page.tsx             # detalle público + reviews — EP-03, EP-09, EP-10, EP-14, EP-15
+│
+├── (auth)/layout.tsx                     # guard: sesión + perfil (RNF9/F0), si no → /login o /onboarding
 ├── (auth)/
-│   ├── enrollments/page.tsx             # "mis inscripciones" — EP-08
-│   ├── profile/page.tsx                 # alta/edición de perfil — EP-16, EP-17, EP-18
-│   └── instructor/courses/              # panel del instructor — EP-02, EP-04, EP-06, EP-12, EP-13
-├── api/
-│   ├── courses/route.ts                          # EP-01 (GET), EP-02 (POST)
-│   ├── courses/[id]/route.ts                     # EP-03 (GET), EP-04 (PATCH)
-│   ├── courses/[id]/lessons/route.ts             # EP-05 (GET), EP-06 (POST)
-│   ├── courses/[id]/lessons/[lessonId]/route.ts  # EP-12 (PATCH), EP-13 (DELETE)
-│   ├── courses/[id]/enroll/route.ts              # EP-07 (POST)
-│   ├── courses/[id]/reviews/route.ts             # EP-09 (GET), EP-10 (POST)
-│   ├── courses/[id]/reviews/[reviewId]/route.ts  # EP-14 (PATCH), EP-15 (DELETE)
-│   ├── categories/route.ts                       # EP-11 (GET)
-│   ├── profiles/route.ts                         # EP-16 (POST)
-│   ├── profiles/me/route.ts                      # EP-17 (GET), EP-18 (PATCH)
-│   └── enrollments/route.ts                      # EP-08 (GET, admite ?course_id=)
+│   ├── profile/page.tsx                  # EP-17, EP-18
+│   ├── enrollments/page.tsx              # "mi aprendizaje" — EP-08
+│   ├── courses/[id]/learn/page.tsx       # reproductor — EP-05
+│   └── instructor/layout.tsx             # guard adicional: role='instructor'
+│       └── instructor/courses/
+│           ├── page.tsx                  # dashboard — EP-01?mine=true (ver nota abajo)
+│           ├── new/page.tsx              # EP-02
+│           └── [id]/edit|lessons|students/page.tsx   # EP-04, EP-06/12/13, EP-08?course_id=
+│
+├── api/                                   # 18 endpoints en 10 route.ts (ver tabla en PlanImplementacion.md §3)
+├── components/                            # ui/, layout/, courses/, lessons/, enrollments/, reviews/, profile/
 └── lib/
-    └── supabase/                        # clients (server) — usan RLS, nunca service_role en el navegador
+    ├── supabase/{server,client,middleware}.ts
+    ├── validation/schemas.ts              # zod, límites exactos de Spec.md §5.2
+    ├── visibility.ts                      # patrón "SELECT visibilidad antes de escribir" (403 vs 404)
+    ├── profile.ts, http.ts, fetchApi.ts, cn.ts
 ```
 
-Cada ruta bajo `api/` debe implementar exactamente el contrato descrito en [`../docs/contracts/endpoints.md`](../docs/contracts/endpoints.md) (mismos códigos de éxito/error, mismos tipos de [`../docs/contracts/types.ts`](../docs/contracts/types.ts)) y apoyarse en las policies RLS de [`../Spec.md`](../Spec.md) §5.3 como única fuente de autorización a nivel de datos.
+**Arquitectura de acceso (RNF10):** cumplida. Los Server Components de dominio (catálogo, detalle, dashboard) llaman a `app/api/*` vía `lib/fetchApi.ts` (reenvía la cookie de sesión), nunca a `supabase-js` directo para las 6 tablas. Excepción pragmática documentada: checks de sesión/perfil para guards de layout y Navbar (`lib/profile.ts`) leen `profiles` directo — no es dato de negocio gateado por las reglas que RNF10 protege (`RLS-C6`, `RLS-L5`, validación de `content_url`, 404/200 de `EP-05`).
 
-**Arquitectura de acceso (RNF10, decisión validada):** `app/api/*` es el **único** punto de entrada a los datos. Ningún componente de `(public)`/`(auth)` debe instanciar `supabase-js` contra Postgres directamente (ni para leer ni para escribir) — todos llaman a estas rutas. Esto es lo que hace cumplir reglas que no viven en RLS: `RLS-C6`/`RLS-L5` (invariantes de publicación), la validación de formato de `content_url`, la distinción 404 vs `200 []` de `EP-05`, y la paginación/orden por defecto de `docs/contracts/endpoints.md`.
+**Desviación de implementación señalada (no en `Spec.md`):** `GET /api/courses` acepta `?mine=true` (requiere sesión) para que el dashboard de instructor liste solo sus propios cursos, publicados o no, sin mezclarse con el catálogo público de terceros. Es aditiva y no cambia ningún caso ya documentado — evaluar si se formaliza en `Spec.md`/`endpoints.md`.
+
+**RPC de Postgres usada:** `EP-13` invoca `delete_lesson_and_sync_publish` (nunca `.from('lessons').delete()` directo) para la atomicidad de `RLS-L5`.

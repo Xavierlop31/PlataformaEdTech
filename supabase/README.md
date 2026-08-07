@@ -1,25 +1,25 @@
-# supabase/ (placeholder)
-
-Esta carpeta está vacía intencionalmente. Cuando arranque la fase de implementación, aquí vivirá:
+# supabase/ — implementado
 
 ```
 supabase/
-├── config.toml                              # config del proyecto Supabase local (supabase init)
+├── config.toml
+├── seed.sql                                          # categorías de desarrollo (RLS-CAT1, gestión manual)
 └── migrations/
-    ├── 20260101000001_create_profiles.sql          # incluye el trigger profiles_role_immutable (RLS-P2)
-    ├── 20260101000002_create_categories.sql
-    ├── 20260101000003_create_courses.sql
-    ├── 20260101000004_create_lessons.sql           # incluye índice compuesto (course_id, position)
-    ├── 20260101000005_create_enrollments.sql
-    ├── 20260101000006_create_reviews.sql
-    ├── 20260101000007_enable_rls_policies.sql      # profiles, categories, courses, lessons, enrollments, reviews
-    └── 20260101000008_create_delete_lesson_rpc.sql # función delete_lesson_and_sync_publish (RLS-L5)
+    ├── 20260807000001_create_profiles.sql            # tabla + RLS + trigger profiles_role_immutable (RLS-P2)
+    ├── 20260807000002_create_categories.sql          # tabla + RLS
+    ├── 20260807000003_create_courses.sql             # tabla + índice is_published + RLS
+    ├── 20260807000004_create_enrollments.sql         # tabla + índice + RLS (antes que lessons: su policy la referencia)
+    ├── 20260807000005_create_lessons.sql             # tabla + índice compuesto (course_id, position) + RLS
+    ├── 20260807000006_create_reviews.sql             # tabla + índice + RLS (con la enmienda de RLS-R2)
+    └── 20260807000007_delete_lesson_and_sync_publish_rpc.sql   # función RPC de RLS-L5
 ```
 
-**Convención de nombres:** `<timestamp>_<verbo>_<tabla>.sql`, una migración por tabla en el orden de dependencias (perfiles y categorías primero, luego cursos, luego lecciones/inscripciones/reviews), y una migración final dedicada a `ENABLE ROW LEVEL SECURITY` + policies.
+**Desviación del orden documentado originalmente:** `enrollments` se creó **antes** que `lessons` (no como listaba la versión anterior de este README) porque la policy `lessons_select_enrolled_or_owner` hace `EXISTS (SELECT ... FROM enrollments ...)` — si `enrollments` no existe todavía, la migración de `lessons` falla. Cada migración incluye su propio `ENABLE ROW LEVEL SECURITY` + policies (no hay una migración separada "solo RLS" al final, a diferencia del plan original) para poder seguir esta dependencia sin duplicar pasos.
 
-El DDL de las 6 tablas y el SQL de referencia de cada policy RLS **ya están definidos y validados** en [`../Spec.md`](../Spec.md) §5.2 y §5.3 — la implementación consiste en copiarlos a estos archivos de migración, no en diseñarlos de nuevo. Esto incluye la migración de `profiles` (`profiles_select_public`, `profiles_insert_self`, `profiles_update_self` + el trigger `profiles_role_immutable`) y la de `categories` (`categories_select_public`, sin policies de escritura).
+**`RLS-C6` (no publicar sin lecciones):** vive solo en el Route Handler (`app/api/courses/[id]/route.ts`), no en Postgres — no hay policy ni trigger para esto, tal como decidido en `Spec.md`.
 
-**Reglas de negocio que NO viven acá (decisión validada, RNF10 de `Spec.md`):** `RLS-C6` (no publicar sin lecciones) y `RLS-L5` (auto-despublicar al borrar la última lección) son validaciones del Route Handler (`app/api/*`), no de Postgres — no hay policy ni trigger para ellas. La única fuente de verdad de escritura es la API, nunca `supabase-js` directo desde el navegador.
+**`RLS-L5` (auto-despublicar al borrar la última lección):** a diferencia de `RLS-C6`, **sí** vive en Postgres, como función RPC `delete_lesson_and_sync_publish` (`security invoker`, ejecuta `DELETE` + `count` + `UPDATE` condicional en una sola transacción real). `EP-13` la invoca vía `supabase.rpc(...)`, nunca `.from('lessons').delete()` directo — ver el comentario en la migración 7 y `Spec.md` §5.3.
 
-**Testing:** `supabase start` (Docker) es el prerrequisito para correr `tests/integration/*.steps.test.ts` — ver [`../docs/adr/0001-estrategia-testing.md`](../docs/adr/0001-estrategia-testing.md) y [`../tests/README.md`](../tests/README.md).
+**No ejecutado en este entorno:** no había Docker disponible para correr `supabase start`, así que estas migraciones **no se corrieron contra un Postgres real** — quedan escritas y revisadas manualmente contra `Spec.md` §5.2/§5.3, pero el checklist de `Spec.md` ("validar que las policies SQL se ejecuten sin error") sigue pendiente. Antes de usar en desarrollo: `npm run supabase:start` (requiere Docker Desktop) y completar `.env.local` con las claves que imprime.
+
+**Testing:** ver [`../tests/README.md`](../tests/README.md) — misma limitación de Docker aplica a `tests/integration/*.steps.test.ts`.

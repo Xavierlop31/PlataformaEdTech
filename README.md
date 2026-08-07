@@ -1,41 +1,47 @@
-# Plataforma EdTech
+# Apex Performance Learning — Plataforma EdTech
 
-Plataforma de cursos online (estilo Udemy/Gumroad) con dos roles — **instructor** y **estudiante** — construida con Next.js y Supabase.
+Plataforma de cursos online (estilo Udemy/Gumroad) con dos roles — **instructor** y **estudiante** — construida con Next.js 16 + React 19 + Supabase + Tailwind v4.
 
-**Estado del proyecto:** fase de especificación y contratos completada. Implementación de código aún no iniciada.
+**Estado del proyecto:** implementación completa según [`PlanImplementacion.md`](PlanImplementacion.md) — `npm run build` y `npm run lint` pasan limpios. Pendiente: validar migraciones/policies y correr la suite de integración contra Supabase real (requiere Docker, no disponible en el entorno donde se implementó — ver `supabase/README.md` y `tests/README.md`).
 
 ## Cómo navegar este repo
 
-Leer en este orden:
-
-1. [`Spec.md`](Spec.md) — fuente única de verdad: visión, usuarios, funcionalidades, flujos, arquitectura (modelo de 6 tablas + reglas RLS explícitas) y requisitos no funcionales.
-2. [`docs/contracts/endpoints.md`](docs/contracts/endpoints.md) — contrato confirmado de cada endpoint (`EP-01`..`EP-18`), con payloads de ejemplo y códigos de error.
-3. [`docs/contracts/types.ts`](docs/contracts/types.ts) — tipos TypeScript derivados 1:1 del modelo de datos del Spec.
-4. [`docs/gherkin/`](docs/gherkin/) — criterios de aceptación en Gherkin (Dado/Cuando/Entonces), un archivo por entidad (`courses`, `lessons`, `enrollments`, `reviews`, `profiles`, `categories`), como especificación legible **y ejecutable** (ver ADR-0001).
-5. [`docs/traceability.md`](docs/traceability.md) — matriz que correlaciona cada regla del Spec con su endpoint, su escenario Gherkin y su futuro test automatizado.
-6. [`docs/adr/0001-estrategia-testing.md`](docs/adr/0001-estrategia-testing.md) — decisión validada de framework de testing (Vitest híbrido + Gherkin ejecutable + Supabase CLI local).
-7. [`docs/ambiguedades-resueltas.md`](docs/ambiguedades-resueltas.md) — registro histórico de las ambigüedades detectadas en la revisión del Implementador y cómo se resolvieron, ronda por ronda.
+1. [`Spec.md`](Spec.md) — fuente única de verdad del contrato: visión, usuarios, funcionalidades, flujos, arquitectura (modelo de 6 tablas + reglas RLS explícitas) y requisitos no funcionales.
+2. [`Technical_spec.md`](Technical_spec.md) — nombre de producto y guía de estilo UI (colores, tipografía) usada para el diseño.
+3. [`PlanImplementacion.md`](PlanImplementacion.md) — plan de componentes y endpoints aprobado, base de la implementación real en `app/`.
+4. [`docs/contracts/endpoints.md`](docs/contracts/endpoints.md) y [`docs/contracts/types.ts`](docs/contracts/types.ts) — contrato de cada endpoint y tipos compartidos (importados directo por `app/` vía `@/docs/contracts/types`).
+5. [`docs/gherkin/`](docs/gherkin/) — criterios de aceptación, ejecutables vía Vitest + `@amiceli/vitest-cucumber` (ver `tests/`).
+6. [`docs/traceability.md`](docs/traceability.md) — matriz Spec ↔ Endpoint ↔ Gherkin ↔ Test, con estado real de implementación.
+7. [`docs/adr/0001-estrategia-testing.md`](docs/adr/0001-estrategia-testing.md) — decisión de framework de testing.
+8. [`docs/ambiguedades-resueltas.md`](docs/ambiguedades-resueltas.md) — historial de ambigüedades del Spec y su resolución.
 
 ## Estructura del repo
 
 ```
 PlataformaEdTech/
-├── Spec.md                  # fuente de verdad
-├── docs/
-│   ├── contracts/            # contrato de endpoints + tipos TS
-│   ├── gherkin/               # criterios de aceptación (.feature), ejecutables vía Vitest (ADR-0001)
-│   ├── adr/                   # decisiones de arquitectura (ADRs)
-│   └── traceability.md        # matriz de correlación Spec ↔ Endpoints ↔ Gherkin ↔ Tests
-├── app/                       # placeholder — estructura prevista de Next.js App Router (ver app/README.md)
-├── supabase/                  # placeholder — convención de migraciones futuras (ver supabase/README.md)
-└── tests/                     # placeholder — estructura prevista de testing (ver tests/README.md y ADR-0001)
+├── Spec.md, Technical_spec.md, PlanImplementacion.md
+├── app/                       # Next.js App Router — código real (ver app/README.md)
+├── supabase/                  # migraciones + RLS + RPC (ver supabase/README.md)
+├── tests/                     # Vitest + Gherkin ejecutable (ver tests/README.md)
+└── docs/
+    ├── contracts/              # contrato de endpoints + tipos TS (consumidos por app/)
+    ├── gherkin/                # criterios de aceptación (.feature), ejecutables
+    ├── adr/                    # decisiones de arquitectura
+    ├── traceability.md         # matriz de correlación Spec ↔ Endpoints ↔ Gherkin ↔ Tests
+    └── ambiguedades-resueltas.md
 ```
 
-`app/`, `supabase/` y `tests/` están vacíos a propósito: documentan la forma que tendrá el proyecto en la fase de implementación, sin adelantar código todavía.
+## Levantar el proyecto localmente
 
-## Próxima fase (no iniciada)
+```bash
+npm install
+npm run supabase:start        # requiere Docker Desktop — imprime las claves locales
+# completar .env.local con esas claves (ver .env.local.example)
+npm run dev
+```
 
-- Inicializar el proyecto Next.js y el proyecto Supabase.
-- Convertir el DDL y las policies de `Spec.md` §5.2/§5.3 en migraciones SQL reales (`supabase/migrations/`).
-- Implementar cada ruta de `docs/contracts/endpoints.md` respetando los tipos de `docs/contracts/types.ts`.
-- Configurar Vitest + `@amiceli/vitest-cucumber` + Supabase CLI local (ver `docs/adr/0001-estrategia-testing.md` y `tests/README.md`) y automatizar los escenarios de `docs/gherkin/` (actualizando `docs/traceability.md`).
+Para tests: `npm test` (además de lo anterior). Ver `tests/README.md` para el estado real de la suite (escrita y verificada estructuralmente; no corrida end-to-end en el entorno de implementación por falta de Docker).
+
+## Desviaciones de implementación señaladas (no estaban en `Spec.md`)
+
+- `GET /api/courses` acepta `?mine=true` (dashboard de instructor) — ver nota en `app/README.md`.
